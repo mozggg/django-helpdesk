@@ -1365,6 +1365,8 @@ class CustomField(models.Model):
         ('url', _('URL')),
         ('ipaddress', _('IP Address')),
         ('slug', _('Slug')),
+        ('varchar_cyr', _('Character (single line) with cyrillic symbol(s)')),
+
     )
 
     data_type = models.CharField(

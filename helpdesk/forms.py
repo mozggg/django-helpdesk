@@ -36,6 +36,11 @@ CUSTOMFIELD_TO_FIELD_DICT = {
     'slug': forms.SlugField,
 }
 
+from django.core.exceptions import ValidationError
+import re
+def validate_cyr(value):
+    if not re.search('[\u0400-\u04FF]', value):
+        raise ValidationError("Поле заполнено неверно")
 
 class CustomFieldMixin(object):
     """
@@ -46,6 +51,10 @@ class CustomFieldMixin(object):
         # if-elif branches start with special cases
         if field.data_type == 'varchar':
             fieldclass = forms.CharField
+            instanceargs['max_length'] = field.max_length
+        elif field.data_type == 'varchar_cyr':
+            fieldclass = forms.CharField
+            instanceargs['validators'] = [validate_cyr]
             instanceargs['max_length'] = field.max_length
         elif field.data_type == 'text':
             fieldclass = forms.CharField
