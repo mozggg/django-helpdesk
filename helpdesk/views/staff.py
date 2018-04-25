@@ -850,7 +850,7 @@ def ticket_list(request):
         # date.
 
         query_params = {
-            'filtering': {'status__in': [1, 2, 3]},
+            'filtering': {'status__in': [1, 2]},
             'sorting': 'created',
         }
     else:
@@ -909,7 +909,7 @@ def ticket_list(request):
     except ValidationError:
         # invalid parameters in query, return default query
         query_params = {
-            'filtering': {'status__in': [1, 2, 3]},
+            'filtering': {'status__in': [1, 2]},
             'sorting': 'created',
         }
         ticket_qs = apply_query(tickets, query_params)
