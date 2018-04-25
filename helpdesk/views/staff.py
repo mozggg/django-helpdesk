@@ -914,6 +914,12 @@ def ticket_list(request):
         }
         ticket_qs = apply_query(tickets, query_params)
 
+    #duct tape our fields
+    ticket_qs = ticket_qs.extra(
+        select={'div':'select value from helpdesk_ticketcustomfieldvalue where field_id=1 and ticket_id=helpdesk_ticket.id',
+                'moved':'select max(datetime) from sib_helpdesk_ticketqueuechange where ticket_id=helpdesk_ticket.id'},
+    )
+
     search_message = ''
     if 'query' in context and settings.DATABASES['default']['ENGINE'].endswith('sqlite'):
         search_message = _(
