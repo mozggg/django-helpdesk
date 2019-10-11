@@ -13,7 +13,7 @@ from django.contrib.auth import views as auth_views
 from django.views.generic import TemplateView
 
 from helpdesk import settings as helpdesk_settings
-from helpdesk.views import feeds, staff, public, kb
+from helpdesk.views import feeds, staff, public, kb, login
 
 
 class DirectTemplateView(TemplateView):
@@ -185,14 +185,25 @@ urlpatterns += [
 
 urlpatterns += [
     url(r'^login/$',
-        auth_views.login,
-        {'template_name': 'helpdesk/registration/login.html'},
+        login.login,
         name='login'),
 
     url(r'^logout/$',
-        auth_views.logout,
-        {'template_name': 'helpdesk/registration/login.html', 'next_page': '../'},
+        auth_views.LogoutView.as_view(
+            template_name='helpdesk/registration/login.html',
+            next_page='../'),
         name='logout'),
+
+    url(r'^password_change/$',
+        auth_views.PasswordChangeView.as_view(
+            template_name='helpdesk/registration/change_password.html',
+            success_url='./done'),
+        name='password_change'),
+
+    url(r'^password_change/done$',
+        auth_views.PasswordChangeDoneView.as_view(
+            template_name='helpdesk/registration/change_password_done.html',),
+        name='password_change_done'),
 ]
 
 if helpdesk_settings.HELPDESK_KB_ENABLED:

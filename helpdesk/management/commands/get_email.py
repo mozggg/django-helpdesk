@@ -31,6 +31,8 @@ from bs4 import BeautifulSoup
 
 from email_reply_parser import EmailReplyParser
 
+
+from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management.base import BaseCommand
@@ -41,9 +43,10 @@ from django.utils import encoding, six, timezone
 from helpdesk import settings
 from helpdesk.lib import send_templated_mail, safe_template_context, process_attachments
 from helpdesk.models import Queue, Ticket, TicketCC, FollowUp, IgnoreEmail
-from django.contrib.auth.models import User
 
 import logging
+
+User = get_user_model()
 
 
 STRIPPED_SUBJECT_STRINGS = [
@@ -332,7 +335,7 @@ def ticket_from_message(message, queue, logger):
                 return False
             return True
 
-    matchobj = re.match(r".*\[" + queue.slug + "-(?P<id>\d+)\]", subject)
+    matchobj = re.match(r".*\[" + queue.slug + r"-(?P<id>\d+)\]", subject)
     if matchobj:
         # This is a reply or forward.
         ticket = matchobj.group('id')
@@ -545,6 +548,17 @@ def ticket_from_message(message, queue, logger):
                 sender=queue.from_address,
                 fail_silently=True,
             )
+        # copy email to all those CC'd to this particular ticket
+        for cc in t.ticketcc_set.all():
+            # don't duplicate email to assignee
+            if t.assigned_to.email != cc.email_address:
+                send_templated_mail(
+                    'updated_cc',
+                    context,
+                    recipients=cc.email_address,
+                    sender=queue.from_address,
+                    fail_silently=True,
+                )
 
     return t
 
