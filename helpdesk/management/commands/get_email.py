@@ -354,6 +354,7 @@ def ticket_from_message(message, queue, logger):
 
         name = part.get_param("name")
         if name:
+            name = decode_mail_headers(name)
             name = email.utils.collapse_rfc2231_value(name)
 
         if part.get_content_maintype() == 'text' and name is None:
