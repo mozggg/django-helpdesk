@@ -358,19 +358,22 @@ def ticket_from_message(message, queue, logger):
             name = email.utils.collapse_rfc2231_value(name)
 
         if part.get_content_maintype() == 'text' and name is None:
+            decoded_content = decodeUnknown(part.get_content_charset(), part.get_payload(decode=True))
             if part.get_content_subtype() == 'plain':
                 body = EmailReplyParser.parse_reply(
-                    decodeUnknown(part.get_content_charset(), part.get_payload(decode=True))
+                    decoded_content
                 )
                 # workaround to get unicode text out rather than escaped text
                 try:
                     body = body.encode('ascii').decode('unicode_escape')
                 except UnicodeEncodeError:
                     body.encode('utf-8')
+                if not body:
+                    body = '< >'
                 logger.debug("Discovered plain text MIME part")
             else:
                 files.append(
-                    SimpleUploadedFile(_("email_html_body.html"), encoding.smart_bytes(part.get_payload()), 'text/html')
+                    SimpleUploadedFile(_("email_html_body.html"), encoding.smart_bytes(decoded_content), 'text/html')
                 )
                 logger.debug("Discovered HTML MIME part")
         else:
