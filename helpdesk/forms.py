@@ -6,22 +6,21 @@ django-helpdesk - A Django powered ticket tracker for small enterprise.
 forms.py - Definitions of newforms-based forms for creating and maintaining
            tickets.
 """
-
+import logging
 
 from django.core.exceptions import ObjectDoesNotExist
-from django.utils.six import StringIO
 from django import forms
-from django.forms import widgets
 from django.conf import settings
 from django.utils.translation import ugettext_lazy as _
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
-from helpdesk.lib import send_templated_mail, safe_template_context, process_attachments
-from helpdesk.models import (Ticket, Queue, FollowUp, Attachment, IgnoreEmail, TicketCC,
-                             CustomField, TicketCustomFieldValue, TicketDependency)
+from helpdesk.lib import safe_template_context, process_attachments
+from helpdesk.models import (Ticket, Queue, FollowUp, IgnoreEmail, TicketCC,
+                             CustomField, TicketCustomFieldValue, TicketDependency, UserSettings, KBItem)
 from helpdesk import settings as helpdesk_settings
 
+logger = logging.getLogger(__name__)
 User = get_user_model()
 
 CUSTOMFIELD_TO_FIELD_DICT = {
@@ -168,7 +167,7 @@ class AbstractTicketForm(CustomFieldMixin, forms.Form):
         widget=forms.Select(attrs={'class': 'form-control'}),
         choices=Ticket.PRIORITY_CHOICES,
         required=True,
-        initial='3',
+        initial=getattr(settings, 'HELPDESK_PUBLIC_TICKET_PRIORITY', '3'),
         label=_('Priority'),
         help_text=_("Please select a priority carefully. If unsure, leave it as '3'."),
     )
@@ -176,14 +175,26 @@ class AbstractTicketForm(CustomFieldMixin, forms.Form):
     due_date = forms.DateTimeField(
         widget=forms.TextInput(attrs={'class': 'form-control'}),
         required=False,
+        input_formats=['%d/%m/%Y', '%m/%d/%Y', "%d.%m.%Y", ],
         label=_('Due on'),
     )
 
     attachment = forms.FileField(
+        widget=forms.FileInput(attrs={'class': 'form-control-file'}),
         required=False,
         label=_('Attach File'),
         help_text=_('You can attach a file such as a document or screenshot to this ticket.'),
     )
+
+    def __init__(self, kbcategory=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if kbcategory:
+            self.fields['kbitem'] = forms.ChoiceField(
+                widget=forms.Select(attrs={'class': 'form-control'}),
+                required=False,
+                label=_('Knowledge Base Item'),
+                choices=[(kbi.pk, kbi.title) for kbi in KBItem.objects.filter(category=kbcategory.pk, enabled=True)],
+            )
 
     def _add_form_custom_fields(self, staff_only_filter=None):
         if staff_only_filter is None:
@@ -200,18 +211,33 @@ class AbstractTicketForm(CustomFieldMixin, forms.Form):
 
             self.customfield_to_field(field, instanceargs)
 
-    def _create_ticket(self):
-        queue = Queue.objects.get(id=int(self.cleaned_data['queue']))
+    def _get_queue(self):
+        # this procedure is re-defined for public submission form
+        return Queue.objects.get(id=int(self.cleaned_data['queue']))
 
-        ticket = Ticket(title=self.cleaned_data['title'],
-                        submitter_email=self.cleaned_data['submitter_email'],
-                        created=timezone.now(),
-                        status=Ticket.OPEN_STATUS,
-                        queue=queue,
-                        description=self.cleaned_data['body'],
-                        priority=self.cleaned_data['priority'],
-                        due_date=self.cleaned_data['due_date'],
-                        )
+    def _create_ticket(self):
+        queue = self._get_queue()
+        kbitem = None
+        if 'kbitem' in self.cleaned_data:
+            kbitem = KBItem.objects.get(id=int(self.cleaned_data['kbitem']))
+
+        ticket = Ticket(
+            title=self.cleaned_data['title'],
+            submitter_email=self.cleaned_data['submitter_email'],
+            created=timezone.now(),
+            status=Ticket.OPEN_STATUS,
+            queue=queue,
+            description=self.cleaned_data['body'],
+            priority=self.cleaned_data.get(
+                'priority',
+                getattr(settings, "HELPDESK_PUBLIC_TICKET_PRIORITY", "3")
+            ),
+            due_date=self.cleaned_data.get(
+                'due_date',
+                getattr(settings, "HELPDESK_PUBLIC_TICKET_DUE_DATE", None)
+            ) or None,
+            kbitem=kbitem,
+        )
 
         return ticket, queue
 
@@ -247,56 +273,16 @@ class AbstractTicketForm(CustomFieldMixin, forms.Form):
         context = safe_template_context(ticket)
         context['comment'] = followup.comment
 
-        messages_sent_to = []
-
-        if ticket.submitter_email:
-            send_templated_mail(
-                'newticket_submitter',
-                context,
-                recipients=ticket.submitter_email,
-                sender=queue.from_address,
-                fail_silently=True,
-                files=files,
-            )
-            messages_sent_to.append(ticket.submitter_email)
-
-        if ticket.assigned_to and \
-                ticket.assigned_to != user and \
-                ticket.assigned_to.usersettings_helpdesk.settings.get('email_on_ticket_assign', False) and \
-                ticket.assigned_to.email and \
-                ticket.assigned_to.email not in messages_sent_to:
-            send_templated_mail(
-                'assigned_owner',
-                context,
-                recipients=ticket.assigned_to.email,
-                sender=queue.from_address,
-                fail_silently=True,
-                files=files,
-            )
-            messages_sent_to.append(ticket.assigned_to.email)
-
-        if queue.new_ticket_cc and queue.new_ticket_cc not in messages_sent_to:
-            send_templated_mail(
-                'newticket_cc',
-                context,
-                recipients=queue.new_ticket_cc,
-                sender=queue.from_address,
-                fail_silently=True,
-                files=files,
-            )
-            messages_sent_to.append(queue.new_ticket_cc)
-
-        if queue.updated_ticket_cc and \
-                queue.updated_ticket_cc != queue.new_ticket_cc and \
-                queue.updated_ticket_cc not in messages_sent_to:
-            send_templated_mail(
-                'newticket_cc',
-                context,
-                recipients=queue.updated_ticket_cc,
-                sender=queue.from_address,
-                fail_silently=True,
-                files=files,
-            )
+        roles = {'submitter': ('newticket_submitter', context),
+                 'new_ticket_cc': ('newticket_cc', context),
+                 'ticket_cc': ('newticket_cc', context)}
+        if ticket.assigned_to and ticket.assigned_to.usersettings_helpdesk.email_on_ticket_assign:
+            roles['assigned_to'] = ('assigned_owner', context)
+        ticket.send(
+            roles,
+            fail_silently=True,
+            files=files,
+        )
 
 
 class TicketForm(AbstractTicketForm):
@@ -306,25 +292,38 @@ class TicketForm(AbstractTicketForm):
     submitter_email = forms.EmailField(
         required=False,
         label=_('Submitter E-Mail Address'),
-        widget=forms.TextInput(attrs={'class': 'form-control'}),
+        widget=forms.TextInput(attrs={'class': 'form-control', 'type': 'email'}),
         help_text=_('This e-mail address will receive copies of all public '
                     'updates to this ticket.'),
     )
-
     assigned_to = forms.ChoiceField(
-        widget=forms.Select(attrs={'class': 'form-control'}),
-        choices=(),
+        widget=(
+            forms.Select(attrs={'class': 'form-control'})
+            if not helpdesk_settings.HELPDESK_CREATE_TICKET_HIDE_ASSIGNED_TO
+            else forms.HiddenInput()
+        ),
         required=False,
         label=_('Case owner'),
         help_text=_('If you select an owner other than yourself, they\'ll be '
                     'e-mailed details of this ticket immediately.'),
+
+        choices=()
     )
 
     def __init__(self, *args, **kwargs):
         """
         Add any custom fields that are defined to the form.
         """
-        super(TicketForm, self).__init__(*args, **kwargs)
+        queue_choices = kwargs.pop("queue_choices")
+
+        super().__init__(*args, **kwargs)
+
+        self.fields['queue'].choices = queue_choices
+        if helpdesk_settings.HELPDESK_STAFF_ONLY_TICKET_OWNERS:
+            assignable_users = User.objects.filter(is_active=True, is_staff=True).order_by(User.USERNAME_FIELD)
+        else:
+            assignable_users = User.objects.filter(is_active=True).order_by(User.USERNAME_FIELD)
+        self.fields['assigned_to'].choices = [('', '--------')] + [(u.id, u.get_username()) for u in assignable_users]
         self._add_form_custom_fields()
 
     def save(self, user=None):
@@ -366,26 +365,61 @@ class PublicTicketForm(AbstractTicketForm):
     Ticket Form creation for all users (public-facing).
     """
     submitter_email = forms.EmailField(
-        widget=forms.TextInput(attrs={'class': 'form-control'}),
+        widget=forms.TextInput(attrs={'class': 'form-control', 'type': 'email'}),
         required=True,
         label=_('Your E-Mail Address'),
         help_text=_('We will e-mail you when your ticket is updated.'),
     )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, hidden_fields=(), readonly_fields=(), *args, **kwargs):
         """
         Add any (non-staff) custom fields that are defined to the form
         """
         super(PublicTicketForm, self).__init__(*args, **kwargs)
-
-        if hasattr(settings, 'HELPDESK_PUBLIC_TICKET_QUEUE'):
-            self.fields['queue'].widget = forms.HiddenInput()
-        if hasattr(settings, 'HELPDESK_PUBLIC_TICKET_PRIORITY'):
-            self.fields['priority'].widget = forms.HiddenInput()
-        if hasattr(settings, 'HELPDESK_PUBLIC_TICKET_DUE_DATE'):
-            self.fields['due_date'].widget = forms.HiddenInput()
-
         self._add_form_custom_fields(False)
+
+        field_hide_table = {
+            'queue': 'HELPDESK_PUBLIC_TICKET_QUEUE',
+            'priority': 'HELPDESK_PUBLIC_TICKET_PRIORITY',
+            'due_date': 'HELPDESK_PUBLIC_TICKET_DUE_DATE',
+        }
+
+        for field_name, field_setting_key in field_hide_table.items():
+            has_settings_default_value = getattr(settings, field_setting_key, None)
+            if has_settings_default_value is not None:
+                hidden_fields += (field_name,)
+
+        for field in hidden_fields:
+            if field in self.fields:
+                del self.fields[field]
+
+        public_queues = Queue.objects.filter(allow_public_submission=True)
+
+        if len(public_queues) == 0:
+            logger.warning(
+                "There are no public queues defined - public ticket creation is impossible"
+            )
+
+        if 'queue' in self.fields:
+            self.fields['queue'].choices = [('', '--------')] + [
+                (q.id, q.title) for q in public_queues]
+
+    def _get_queue(self):
+        if getattr(settings, 'HELPDESK_PUBLIC_TICKET_QUEUE', None) is not None:
+            # force queue to be the pre-defined one
+            # (only for public submissions)
+            public_queue = Queue.objects.filter(
+                slug=settings.HELPDESK_PUBLIC_TICKET_QUEUE
+            ).first()
+            if not public_queue:
+                logger.fatal(
+                    "Public queue '%s' is configured as default but can't be found",
+                    settings.HELPDESK_PUBLIC_TICKET_QUEUE
+                )
+            return public_queue
+        else:
+            # get the queue user entered
+            return Queue.objects.get(id=int(self.cleaned_data['queue']))
 
     def save(self):
         """
@@ -409,40 +443,11 @@ class PublicTicketForm(AbstractTicketForm):
         return ticket
 
 
-class UserSettingsForm(forms.Form):
-    login_view_ticketlist = forms.BooleanField(
-        label=_('Show Ticket List on Login?'),
-        help_text=_('Display the ticket list upon login? Otherwise, the dashboard is shown.'),
-        required=False,
-    )
+class UserSettingsForm(forms.ModelForm):
 
-    email_on_ticket_change = forms.BooleanField(
-        label=_('E-mail me on ticket change?'),
-        help_text=_('If you\'re the ticket owner and the ticket is changed via the web by somebody else, do you want to receive an e-mail?'),
-        required=False,
-    )
-
-    email_on_ticket_assign = forms.BooleanField(
-        label=_('E-mail me when assigned a ticket?'),
-        help_text=_('If you are assigned a ticket via the web, do you want to receive an e-mail?'),
-        required=False,
-    )
-
-    tickets_per_page = forms.ChoiceField(
-        label=_('Number of tickets to show per page'),
-        help_text=_('How many tickets do you want to see on the Ticket List page?'),
-        required=False,
-        choices=((10, '10'), (25, '25'), (50, '50'), (100, '100')),
-    )
-
-    use_email_as_submitter = forms.BooleanField(
-        label=_('Use my e-mail address when submitting tickets?'),
-        help_text=_('When you submit a ticket, do you want to automatically '
-                    'use your e-mail address as the submitter address? You '
-                    'can type a different e-mail address when entering the '
-                    'ticket if needed, this option only changes the default.'),
-        required=False,
-    )
+    class Meta:
+        model = UserSettings
+        exclude = ['user', 'settings_pickled']
 
 
 class EmailIgnoreForm(forms.ModelForm):
