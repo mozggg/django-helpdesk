@@ -326,7 +326,7 @@ class TicketForm(AbstractTicketForm):
         self.fields['assigned_to'].choices = [('', '--------')] + [(u.id, u.get_username()) for u in assignable_users]
         self._add_form_custom_fields()
 
-    def save(self, user=None):
+    def save(self, user):
         """
         Writes and returns a Ticket() object
         """
@@ -421,7 +421,7 @@ class PublicTicketForm(AbstractTicketForm):
             # get the queue user entered
             return Queue.objects.get(id=int(self.cleaned_data['queue']))
 
-    def save(self):
+    def save(self, user):
         """
         Writes and returns a Ticket() object
         """
@@ -432,7 +432,8 @@ class PublicTicketForm(AbstractTicketForm):
 
         self._create_custom_fields(ticket)
 
-        followup = self._create_follow_up(ticket, title=_('Ticket Opened Via Web'))
+        followup = self._create_follow_up(
+            ticket, title=_('Ticket Opened Via Web'), user=user)
         followup.save()
 
         files = self._attach_files_to_follow_up(followup)
